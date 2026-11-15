@@ -50,6 +50,8 @@ claude plugin update effort-suggester@claude-effort-suggester
 - If the level already matches, nothing is shown.
 - Every finished turn is logged with the level it was suggested, the level
   it ran at and its output tokens, so you can see what the levels cost you.
+- It learns from your own turns: words that keep turning up in turns that
+  cost more, or less, than your usual start to count in the suggestion.
 
 ## Commands
 
@@ -61,8 +63,34 @@ claude plugin update effort-suggester@claude-effort-suggester
 | `/effort-suggest off` | Suggests nothing and logs nothing. No argument flips on and off. |
 | `/effort-stats` | What your turns cost at each level, and what running above the suggestion cost. |
 | `/effort-stats reset` | Clears the log. |
+| `/effort-words` | The words learned from your turns, and which way each leans. |
+| `/effort-words off` | Stops learning and stops using what was learned. `on` brings both back. |
+| `/effort-words reset` | Deletes every learned word. |
 
-The mode and the log are kept across sessions.
+The mode, the log and the learned words are kept across sessions.
+
+## Learning from your prompts
+
+The built-in keywords are generic. Your work has its own vocabulary, so the
+mod builds a dictionary from it:
+
+- When a turn ends, each distinct word of its prompt is noted with how the
+  turn's output tokens compared with your usual at that effort level: twice
+  the usual is +1, half is -1. Comparing within one level keeps the level
+  itself out of what the words are taught.
+- A word starts to count once it was in 5 turns that leaned at least 0.5 on
+  average. The strongest three of a prompt add at most 2 to the score, or
+  take 2 off.
+- The reason says so when it happens: `high: learned: kubernetes, cluster`.
+
+What is kept: single words and two numbers each, in the mod's own store on
+your machine. No prompt is stored, nothing leaves the machine, and words
+inside pasted code blocks are skipped. Common words and the built-in
+keywords are left out. The dictionary holds its 2,000 most used words.
+
+Learning needs data: nothing is learned until three turns have run at an
+effort level, and a word needs five turns of its own. The rules are in
+`hooks/config.ts` under `learned`.
 
 ## Does it save tokens?
 
@@ -92,6 +120,7 @@ at the suggested level, once there are three such turns to average.
 | `hooks/config.ts` | Every weight, threshold and keyword. Edit this to tune. |
 | `hooks/classify.ts` | The classifier, a pure function. |
 | `hooks/stats.ts` | The usage log and the `/effort-stats` report, pure functions. |
+| `hooks/words.ts` | The learned dictionary and the `/effort-words` report, pure functions. |
 | `hooks/register.tsx` | The hooks: typing, submit, the band, apply, the log, the commands. |
 | `hooks/*.test.ts(x)` | Tests for all of the above. |
 | `types/index.d.ts` | The mod's state contract. |
@@ -133,7 +162,11 @@ claude --plugin-dir /path/to/effort-suggester
 - The estimate compares turns of different prompts, so it is a rough guide,
   not a controlled measurement.
 - The classifier reads wording, not difficulty: a hard problem phrased
-  plainly scores medium.
+  plainly scores medium. Learned words narrow that gap only as far as your
+  costly work has words of its own.
+- A learned word shows that it kept company with costly turns, not that it
+  caused them. One long session on one topic can teach its words too
+  strongly; `/effort-words` shows what was learned and `reset` clears it.
 - A click while a turn is running applies from the next model request on,
   not to the request already in flight. Click before sending to cover the
   whole turn.

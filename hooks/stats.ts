@@ -39,6 +39,16 @@ const isRecord = (value: unknown): value is TurnRecord => {
   )
 }
 
+/**
+ * The usual output of a turn at `level`, from the log: its average there,
+ * or null while fewer than three turns ran at that level.
+ */
+export const usualAt = (log: TurnRecord[], level: string): number | null => {
+  const group = log.filter(one => one.used === level)
+
+  return group.length < MIN_SAMPLE ? null : mean(group)
+}
+
 /** What the store gave back, as records; anything else is dropped. */
 export const parseLog = (stored: unknown): TurnRecord[] =>
   Array.isArray(stored) ? stored.filter(isRecord) : []

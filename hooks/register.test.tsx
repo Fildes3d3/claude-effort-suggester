@@ -604,7 +604,7 @@ test('a session start reads back what /effort-suggest stored', async ($, on) => 
   await ui.unmount()
 })
 
-test('a session start registers the three commands', async ($, on) => {
+test('a session start registers the four commands', async ($, on) => {
   const names: string[] = []
   mock.store(on)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -616,7 +616,12 @@ test('a session start registers the three commands', async ($, on) => {
 
   await $.session.start(SESSION)
 
-  expect(names).toEqual(['effort-check', 'effort-suggest', 'effort-stats'])
+  expect(names).toEqual([
+    'effort-check',
+    'effort-suggest',
+    'effort-stats',
+    'effort-words',
+  ])
 })
 
 // --- Suggesting while the person types ------------------------------------
@@ -847,4 +852,163 @@ test('/effort-stats refuses anything but reset', async ($, on) => {
   expect((await run($, 'effort-stats', 'all')).text).toBe(
     'Usage: /effort-stats [reset]',
   )
+})
+
+// --- Learned words and /effort-words --------------------------------------
+
+/** Six words, none a keyword, none learned: the baseline turns. */
+const PLAIN = 'please update the footer link colour'
+/** A prompt the person's turns will show to be costly. */
+const HEAVY = 'deploy the kubernetes cluster today okay'
+
+/** Three usual turns at medium, then five costly ones with the same words. */
+const teach = async ($: Engine) => {
+  for (const id of ['p1', 'p2', 'p3']) {
+    await turn($, { id, text: PLAIN, effort: 'medium', output: 1000 })
+  }
+  for (const id of ['h1', 'h2', 'h3', 'h4', 'h5']) {
+    await turn($, { id, text: HEAVY, effort: 'medium', output: 8000 })
+  }
+}
+
+test('words from costly turns raise the suggestion for a prompt using them', async ($, on) => {
+  engine(on)
+  mock.store(on)
+  await $.session.start(SESSION)
+
+  expect((await run($, 'effort-check', HEAVY)).text).toContain(
+    'Suggested effort medium',
+  )
+
+  await teach($)
+
+  const { text } = await run($, 'effort-check', HEAVY)
+  expect(text).toContain('Suggested effort high: learned: ')
+  expect(text).toContain('kubernetes')
+  expect(text).toContain(' +2')
+  await run($, 'effort-words', 'reset')
+})
+
+test('/effort-words lists what was learned', async ($, on) => {
+  engine(on)
+  mock.store(on)
+  await $.session.start(SESSION)
+
+  expect((await run($, 'effort-words')).text).toContain('No words learned yet.')
+
+  await teach($)
+
+  const { text } = await run($, 'effort-words')
+  expect(text).toContain('4 words seen, 4 counted in suggestions')
+  expect(text).toContain('kubernetes (5 turns, +')
+  expect(text).toContain('In cheaper turns: none yet')
+  await run($, 'effort-words', 'reset')
+})
+
+test('the first turns at a level teach nothing: there is no usual cost yet', async ($, on) => {
+  engine(on)
+  mock.store(on)
+  await $.session.start(SESSION)
+
+  await turn($, { id: 'a', text: HEAVY, effort: 'medium', output: 8000 })
+  await turn($, { id: 'b', text: HEAVY, effort: 'medium', output: 8000 })
+  await turn($, { id: 'c', text: HEAVY, effort: 'medium', output: 8000 })
+
+  expect((await run($, 'effort-words')).text).toContain('No words learned yet.')
+})
+
+test('/effort-words off stops learning and its use; on brings both back', async ($, on) => {
+  engine(on)
+  mock.store(on)
+  await $.session.start(SESSION)
+  await teach($)
+
+  expect((await run($, 'effort-words', 'off')).text).toContain(
+    'Effort words are off',
+  )
+  expect((await run($, 'effort-check', HEAVY)).text).toContain(
+    'Suggested effort medium',
+  )
+  expect((await run($, 'effort-words')).text).toBe(
+    'Effort words are off. /effort-words on turns them back on.',
+  )
+
+  // A costly turn while off teaches nothing.
+  await turn($, { id: 'x', text: `${PLAIN} sitemap`, effort: 'medium', output: 90000 })
+
+  expect((await run($, 'effort-words', 'on')).text).toContain('Effort words are on')
+  expect((await run($, 'effort-check', HEAVY)).text).toContain(
+    'Suggested effort high: learned: ',
+  )
+  expect((await run($, 'effort-words')).text).not.toContain('sitemap')
+  await run($, 'effort-words', 'reset')
+})
+
+test('/effort-words reset forgets every word', async ($, on) => {
+  engine(on)
+  mock.store(on)
+  await $.session.start(SESSION)
+  await teach($)
+
+  expect((await run($, 'effort-words', 'reset')).text).toBe('Effort words cleared.')
+  expect((await run($, 'effort-words')).text).toContain('No words learned yet.')
+  expect((await run($, 'effort-check', HEAVY)).text).toContain(
+    'Suggested effort medium',
+  )
+})
+
+test('/effort-words refuses anything else', async ($, on) => {
+  engine(on)
+  mock.store(on)
+
+  expect((await run($, 'effort-words', 'all')).text).toBe(
+    'Usage: /effort-words [on | off | reset]',
+  )
+})
+
+test('learned words are read back by the next session', async ($, on) => {
+  engine(on)
+  mock.store(on, { words: { kubernetes: { turns: 6, lean: 12 } } })
+
+  await $.session.start(SESSION)
+
+  expect((await run($, 'effort-check', HEAVY)).text).toContain(
+    'Suggested effort high: learned: kubernetes',
+  )
+  await run($, 'effort-words', 'reset')
+})
+
+test('learning turned off is remembered by the next session', async ($, on) => {
+  engine(on)
+  mock.store(on, {
+    isLearning: false,
+    words: { kubernetes: { turns: 6, lean: 12 } },
+  })
+
+  await $.session.start(SESSION)
+
+  expect((await run($, 'effort-check', HEAVY)).text).toContain(
+    'Suggested effort medium',
+  )
+})
+
+test('words in pasted code are not learned', async ($, on) => {
+  engine(on)
+  mock.store(on)
+  await $.session.start(SESSION)
+
+  for (const id of ['p1', 'p2', 'p3']) {
+    await turn($, { id, text: PLAIN, effort: 'medium', output: 1000 })
+  }
+  await turn($, {
+    id: 'c',
+    text: `${PLAIN}\n\`\`\`\nconst zebra = giraffe\n\`\`\``,
+    effort: 'medium',
+    output: 8000,
+  })
+
+  const { text } = await run($, 'effort-words')
+  expect(text).not.toContain('zebra')
+  expect(text).toContain('4 words seen')
+  await run($, 'effort-words', 'reset')
 })

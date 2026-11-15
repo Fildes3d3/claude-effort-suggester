@@ -3,7 +3,9 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Level, Mode } from '../types'
 import { classify } from './classify'
-import { addRecord, parseLog, rank, report } from './stats'
+import { addRecord, parseLog, rank, report, usualAt } from './stats'
+import { leanOf, learn, parseDictionary, wordReport, wordsOf } from './words'
+import type { Dictionary } from './words'
 
 const suggestion = atom(
   { plugin: 'effort-suggester', key: 'suggestion' } as const,
@@ -27,7 +29,24 @@ const MODES: readonly string[] = ['on', 'save', 'off']
  * Turns in flight on the main loop: what their prompt scored and the level
  * their first request went out at. Lost on a reload, with the turn's record.
  */
-const turns = new Map<string, { suggested: Level; used?: string }>()
+const turns = new Map<
+  string,
+  { suggested: Level; words: string[]; used?: string }
+>()
+
+/**
+ * The learned dictionary, read from the store when the session starts and
+ * kept here so that scoring a keystroke reads no store. Empty while
+ * learning is off.
+ */
+let dictionary: Dictionary = {}
+let isLearning = true
+
+/** The classifier with what was learned: the one every hook scores with. */
+const score = (prompt: string) => classify(prompt, undefined, dictionary)
+
+/** The prose of a prompt: pasted code teaches no words. */
+const proseOf = (prompt: string) => prompt.replace(/```[\s\S]*?(```|$)/g, ' ')
 
 /** The level requests go out at: the applied one until its `/effort` lands. */
 const runningEffort = async ($: EngineInterface) => {
@@ -105,7 +124,7 @@ const scoreDraft = async ($: EngineInterface, text: string) => {
     return
   }
 
-  const { level, reason } = classify(draft)
+  const { level, reason } = score(draft)
   // Typing mostly leaves the result as it was: write, and redraw, on a change.
   if (now?.level === level && now.reason === reason) return
 
@@ -129,6 +148,11 @@ export const register: Register = on => {
       description: 'Show what turns cost at each effort level',
       argumentHint: '[reset]',
     })
+    await $.command.register({
+      name: 'effort-words',
+      description: 'Show the words learned from your turns, or turn learning on or off',
+      argumentHint: '[on | off | reset]',
+    })
 
     // An apply left over from before a reload has nothing waiting on it.
     await update($, applied, () => null)
@@ -140,6 +164,10 @@ export const register: Register = on => {
     } else if ((await $.store.get('isOn')) === false) {
       await update($, mode, () => 'off')
     }
+
+    // Learning is on unless it was turned off; the dictionary comes with it.
+    isLearning = (await $.store.get('isLearning')) !== false
+    dictionary = isLearning ? parseDictionary(await $.store.get('words')) : {}
 
     return next(e)
   })
@@ -168,7 +196,7 @@ export const register: Register = on => {
       const last = await read($, applied)
       if (last !== null && !last.isPending) await update($, applied, () => null)
 
-      const { level, reason } = classify(e.text)
+      const { level, reason } = score(e.text)
       await update($, suggestion, () => ({ level, reason }))
     }
 
@@ -181,7 +209,12 @@ export const register: Register = on => {
       e.agentId === undefined &&
       e.text.trim() !== '' &&
       (await read($, mode)) !== 'off'
-    if (isLogged) turns.set(e.turnId, { suggested: classify(e.text).level })
+    if (isLogged) {
+      turns.set(e.turnId, {
+        suggested: score(e.text).level,
+        words: isLearning ? wordsOf(proseOf(e.text)) : [],
+      })
+    }
 
     return next(e)
   })
@@ -218,9 +251,19 @@ export const register: Register = on => {
         used: turn.used,
         output: e.usage.output_tokens,
       }
+      const { used, words } = turn
       await $.store
         .get('log')
-        .then(stored => $.store.set('log', addRecord(parseLog(stored), record)))
+        .then(async stored => {
+          const log = parseLog(stored)
+          // Taught against the turns before this one, then logged itself.
+          const usual = usualAt(log, used)
+          if (usual !== null && words.length > 0) {
+            dictionary = learn(dictionary, words, leanOf(record.output, usual))
+            await $.store.set('words', dictionary)
+          }
+          await $.store.set('log', addRecord(log, record))
+        })
         .catch(() => undefined)
     }
 
@@ -293,7 +336,7 @@ export const register: Register = on => {
     const prompt = e.args.trim()
     if (prompt === '') return { text: 'Usage: /effort-check <prompt>' }
 
-    const { level, reason, score, signals } = classify(prompt)
+    const { level, reason, score: total, signals } = score(prompt)
     // Also offer it in the band, so the level can be applied before sending.
     if ((await read($, mode)) !== 'off') {
       await update($, suggestion, () => ({ level, reason }))
@@ -307,7 +350,7 @@ export const register: Register = on => {
     return {
       text: [
         `Suggested effort ${reason}`,
-        `Score ${score}${detail ? ` (${detail})` : ''}`,
+        `Score ${total}${detail ? ` (${detail})` : ''}`,
         // A switcher pick shows up here only after the next request.
         `Effort at the last request: ${running ?? 'not known yet'}`,
       ].join('\n'),
@@ -353,5 +396,34 @@ export const register: Register = on => {
     if (arg !== '') return { text: 'Usage: /effort-stats [reset]' }
 
     return { text: report(parseLog(await $.store.get('log'))) }
+  })
+
+  on('command.run', { command: 'effort-words' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+
+    if (arg === 'reset') {
+      dictionary = {}
+      await $.store.delete('words')
+
+      return { text: 'Effort words cleared.' }
+    }
+    if (arg === 'on' || arg === 'off') {
+      isLearning = arg === 'on'
+      await $.store.set('isLearning', isLearning)
+      // Off stops both the learning and its use; the words are kept for on.
+      dictionary = isLearning ? parseDictionary(await $.store.get('words')) : {}
+
+      return {
+        text: isLearning
+          ? 'Effort words are on: prompts teach their words, and learned words count in suggestions.'
+          : 'Effort words are off: nothing is learned or used. /effort-words reset deletes what was learned.',
+      }
+    }
+    if (arg !== '') return { text: 'Usage: /effort-words [on | off | reset]' }
+    if (!isLearning) {
+      return { text: 'Effort words are off. /effort-words on turns them back on.' }
+    }
+
+    return { text: wordReport(dictionary) }
   })
 }

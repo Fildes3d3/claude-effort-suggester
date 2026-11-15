@@ -281,3 +281,31 @@ test('the reason names at most three signals', async () => {
 
   expect(reason.split(' + ')).toHaveLength(3)
 })
+
+// --- Learned words --------------------------------------------------------
+
+test('learned words add a signal of their own', async () => {
+  const dictionary = { footer: { turns: 10, lean: 20 } }
+  const result = classify(PLAIN, CONFIG, dictionary)
+
+  expect(result.signals).toEqual([{ label: 'learned: footer', score: 2 }])
+  expect(result.level).toBe('high')
+  expect(result.reason).toBe('high: learned: footer')
+})
+
+test('learned words can lower a level too', async () => {
+  const dictionary = { footer: { turns: 10, lean: -20 } }
+
+  expect(classify(PLAIN, CONFIG, dictionary).level).toBe('low')
+})
+
+test('with no dictionary nothing is learned', async () => {
+  expect(labels(PLAIN).some(label => label.startsWith('learned'))).toBe(false)
+})
+
+test('learned words inside pasted code do not count', async () => {
+  const dictionary = { secretword: { turns: 10, lean: 20 } }
+  const result = classify(`${PLAIN}\n\`\`\`\nsecretword\n\`\`\``, CONFIG, dictionary)
+
+  expect(result.signals.map(one => one.label)).toEqual(['code block'])
+})

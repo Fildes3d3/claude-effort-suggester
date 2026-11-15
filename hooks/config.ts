@@ -99,6 +99,12 @@ export const CONFIG = {
     { min: 3, score: 2 },
     { min: 1, score: 1 },
   ],
+
+  // Words learned from your own turns (see hooks/words.ts). A word counts
+  // once it was in `minTurns` turns that leaned at least `minLean` from the
+  // usual cost (1 is twice the usual, -1 half). The strongest `maxWords` of
+  // a prompt add up to at most `cap`, either way.
+  learned: { minTurns: 5, minLean: 0.5, maxWords: 3, cap: 2 },
 }
 
 export type Config = typeof CONFIG

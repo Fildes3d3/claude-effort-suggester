@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- The mod learns from your own turns: words that keep turning up in turns
+  costing more, or less, than your usual at that effort level count in the
+  suggestion, named in its reason as `learned: <words>`.
+- `/effort-words` shows the learned words; `/effort-words off | on` stops
+  and restarts learning; `/effort-words reset` deletes them. Only single
+  words are kept, on your machine.
+- `/effort-stats` prints one line per kind of prompt instead of a table,
+  which lost its columns in the app's font.
+
 ## 0.2.0
 
 - The suggestion now appears while you type, before the prompt is sent, so a

@@ -3,6 +3,7 @@
 
 import type { Level } from '../types'
 import { CONFIG, type Config } from './config'
+import { learnedSignal, wordsOf, type Dictionary } from './words'
 
 export type Signal = { label: string; score: number }
 
@@ -74,7 +75,12 @@ const levelOf = (score: number, thresholds: Config['thresholds']): Level => {
   return 'low'
 }
 
-export const classify = (prompt: string, config: Config = CONFIG): Result => {
+export const classify = (
+  prompt: string,
+  config: Config = CONFIG,
+  /** The words learned from the person's own turns; none by default. */
+  dictionary: Dictionary = {},
+): Result => {
   const signals: Signal[] = []
   const add = (label: string, score: number) => {
     if (score !== 0) signals.push({ label, score })
@@ -95,6 +101,9 @@ export const classify = (prompt: string, config: Config = CONFIG): Result => {
   for (const word of hits(prose, config.lower)) add(word, config.lower.score)
   for (const word of hits(prose, config.higher)) add(word, config.higher.score)
   for (const word of hits(prose, config.research)) add(word, config.research.score)
+
+  const learned = learnedSignal(wordsOf(prose, config), dictionary, config.learned)
+  if (learned) add(learned.label, learned.score)
 
   if (prompt.includes('```')) add('code block', config.codeBlock)
   if (STACK_TRACE.some(pattern => pattern.test(prompt))) {
