@@ -1,0 +1,11 @@
+{
+  "name": "effort-suggester",
+  "version": "0.1.0",
+  "description": "Suggests an effort level (low / medium / high / max) for each prompt, with one click to apply it.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "fildes"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/Fildes3d3/claude-effort-suggester"
+}

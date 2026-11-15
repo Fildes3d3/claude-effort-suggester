@@ -1,0 +1,12 @@
+{
+  "name": "claude-effort-suggester",
+  "owner": {
+    "name": "fildes"
+  },
+  "plugins": [
+    {
+      "name": "effort-suggester",
+      "source": "./"
+    }
+  ]
+}
