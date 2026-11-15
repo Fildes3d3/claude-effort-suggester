@@ -1,7 +1,7 @@
 {
   "name": "effort-suggester",
-  "version": "0.1.0",
-  "description": "Suggests an effort level (low / medium / high / max) for each prompt, with one click to apply it.",
+  "version": "0.2.0",
+  "description": "Suggests an effort level (low / medium / high / max) while you type, applies it in one click, and logs what each level costs.",
   "types": "./types/index.d.ts",
   "author": {
     "name": "fildes"

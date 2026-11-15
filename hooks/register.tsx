@@ -1,8 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Level } from '../types'
+import type { Level, Mode } from '../types'
 import { classify } from './classify'
+import { addRecord, parseLog, rank, report } from './stats'
 
 const suggestion = atom(
   { plugin: 'effort-suggester', key: 'suggestion' } as const,
@@ -16,9 +17,24 @@ const applied = atom(
   { plugin: 'effort-suggester', key: 'applied' } as const,
   null,
 )
-const isOn = atom({ plugin: 'effort-suggester', key: 'isOn' } as const, true)
+const mode = atom({ plugin: 'effort-suggester', key: 'mode' } as const, 'on')
 
-const LEVELS = ['low', 'medium', 'high', 'xhigh', 'max']
+/** Every level `/effort` takes, the ones the mod never suggests included. */
+const LEVELS: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max']
+const MODES: readonly string[] = ['on', 'save', 'off']
+
+/**
+ * Turns in flight on the main loop: what their prompt scored and the level
+ * their first request went out at. Lost on a reload, with the turn's record.
+ */
+const turns = new Map<string, { suggested: Level; used?: string }>()
+
+/** The level requests go out at: the applied one until its `/effort` lands. */
+const runningEffort = async ($: EngineInterface) => {
+  const last = await read($, applied)
+
+  return last?.isPending ? last.level : read($, sessionEffort)
+}
 
 /**
  * The session's own effort is now `own`. If that is the applied level, its
@@ -72,6 +88,30 @@ const undo = async ($: EngineInterface) => {
     .catch(() => undefined)
 }
 
+/**
+ * Scores the draft in the prompt box, so the suggestion is there before the
+ * prompt is sent and one click covers the whole turn. An empty box or a
+ * slash command has none.
+ */
+const scoreDraft = async ($: EngineInterface, text: string) => {
+  if ((await read($, mode)) === 'off') return
+
+  const draft = text.trim()
+  const now = await read($, suggestion)
+
+  if (draft === '' || draft.startsWith('/')) {
+    if (now !== null) await update($, suggestion, () => null)
+
+    return
+  }
+
+  const { level, reason } = classify(draft)
+  // Typing mostly leaves the result as it was: write, and redraw, on a change.
+  if (now?.level === level && now.reason === reason) return
+
+  await update($, suggestion, () => ({ level, reason }))
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -81,16 +121,41 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'effort-suggest',
-      description: 'Turn the effort suggester on or off',
-      argumentHint: 'on | off',
+      description: 'Suggest in both directions, only to save, or not at all',
+      argumentHint: 'on | save | off',
+    })
+    await $.command.register({
+      name: 'effort-stats',
+      description: 'Show what turns cost at each effort level',
+      argumentHint: '[reset]',
     })
 
     // An apply left over from before a reload has nothing waiting on it.
     await update($, applied, () => null)
 
-    // The toggle is kept across sessions.
-    const stored = await $.store.get('isOn')
-    if (typeof stored === 'boolean') await update($, isOn, () => stored)
+    // The mode is kept across sessions; `isOn` is what version 0.1.0 stored.
+    const stored = await $.store.get('mode')
+    if (typeof stored === 'string' && MODES.includes(stored)) {
+      await update($, mode, () => stored as Mode)
+    } else if ((await $.store.get('isOn')) === false) {
+      await update($, mode, () => 'off')
+    }
+
+    return next(e)
+  })
+
+  // The person typing: `next` answers the box as the edit leaves it.
+  on('prompt.edit', async ($, e, next) => {
+    const box = await next(e)
+    await scoreDraft($, box.text).catch(() => undefined)
+
+    return box
+  })
+
+  // The box changed some other way: a recalled prompt, an undo, a fill. A
+  // box emptied this way keeps the suggestion: that is a prompt just sent.
+  on('prompt.change', async ($, e, next) => {
+    if (e.text.trim() !== '') await scoreDraft($, e.text).catch(() => undefined)
 
     return next(e)
   })
@@ -98,7 +163,7 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     const isTyped = e.command === undefined && e.isMeta !== true
 
-    if (isTyped && (await read($, isOn))) {
+    if (isTyped && (await read($, mode)) !== 'off') {
       // A new prompt closes the chance to undo the last apply.
       const last = await read($, applied)
       if (last !== null && !last.isPending) await update($, applied, () => null)
@@ -106,6 +171,17 @@ export const register: Register = on => {
       const { level, reason } = classify(e.text)
       await update($, suggestion, () => ({ level, reason }))
     }
+
+    return next(e)
+  })
+
+  // Opens the turn's record with what its prompt scored.
+  on('turn.start', async ($, e, next) => {
+    const isLogged =
+      e.agentId === undefined &&
+      e.text.trim() !== '' &&
+      (await read($, mode)) !== 'off'
+    if (isLogged) turns.set(e.turnId, { suggested: classify(e.text).level })
 
     return next(e)
   })
@@ -121,30 +197,60 @@ export const register: Register = on => {
     if ((await read($, sessionEffort)) !== own) await settle($, own)
 
     const last = await read($, applied)
+    const sent = last?.isPending ? last.level : own
+
+    const turn = turns.get(e.turnId)
+    if (turn && turn.used === undefined) turn.used = sent
 
     return yield* next(last?.isPending ? { ...e, effort: last.level } : e)
+  })
+
+  // Closes the turn's record with what it cost. An interrupted turn is left
+  // out: its cost says nothing about the level.
+  on('turn.complete', async ($, e, next) => {
+    const turn = turns.get(e.turnId)
+    turns.delete(e.turnId)
+
+    if (turn?.used !== undefined && e.usage && !e.isAborted) {
+      const record = {
+        at: Date.now(),
+        suggested: turn.suggested,
+        used: turn.used,
+        output: e.usage.output_tokens,
+      }
+      await $.store
+        .get('log')
+        .then(stored => $.store.set('log', addRecord(parseLog(stored), record)))
+        .catch(() => undefined)
+    }
+
+    return next(e)
   })
 
   // Learns it sooner from `/effort` itself, whoever ran it.
   on('command.run', { command: 'effort' }, async ($, e, next) => {
     const result = await next(e)
     const own = e.args.trim().toLowerCase()
-    if (LEVELS.includes(own)) await settle($, own)
+    // Learning the level must never cost the person their command's answer.
+    if (LEVELS.includes(own)) await settle($, own).catch(() => undefined)
 
     return result
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey || !(await read($, isOn))) return next(e)
+    const current = await read($, mode)
+    if (e.props.hasSurvey || current === 'off') return next(e)
 
     const pending = await read($, suggestion)
     const last = await read($, applied)
-    const running = last?.isPending
-      ? last.level
-      : await read($, sessionEffort)
-    // Nothing to say when the effort already matches, or is not known yet.
+    const running = await runningEffort($)
+    // Nothing to say when the effort already matches, or is not known yet;
+    // in `save` mode, nor when the suggestion would spend more.
     const isShown =
-      pending !== null && running !== null && pending.level !== running
+      pending !== null &&
+      running !== null &&
+      pending.level !== running &&
+      (current === 'on' || rank(pending.level) < rank(running))
 
     if (!isShown && last === null) return next(e)
 
@@ -189,14 +295,11 @@ export const register: Register = on => {
 
     const { level, reason, score, signals } = classify(prompt)
     // Also offer it in the band, so the level can be applied before sending.
-    if (await read($, isOn)) {
+    if ((await read($, mode)) !== 'off') {
       await update($, suggestion, () => ({ level, reason }))
     }
 
-    const last = await read($, applied)
-    const running = last?.isPending
-      ? last.level
-      : await read($, sessionEffort)
+    const running = await runningEffort($)
     const detail = signals
       .map(one => `${one.label} ${one.score > 0 ? '+' : ''}${one.score}`)
       .join(', ')
@@ -213,21 +316,42 @@ export const register: Register = on => {
 
   on('command.run', { command: 'effort-suggest' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
-    if (arg !== '' && arg !== 'on' && arg !== 'off') {
-      return { text: 'Usage: /effort-suggest on | off' }
+    if (arg !== '' && !MODES.includes(arg)) {
+      return { text: 'Usage: /effort-suggest on | save | off' }
     }
 
-    const next = arg === '' ? !(await read($, isOn)) : arg === 'on'
-    await $.store.set('isOn', next)
-    await update($, isOn, () => next)
+    // No argument flips between suggesting and not.
+    const flipped: Mode = (await read($, mode)) === 'off' ? 'on' : 'off'
+    const next = arg === '' ? flipped : (arg as Mode)
+    await $.store.set('mode', next)
+    await update($, mode, () => next)
 
-    if (!next) {
+    if (next === 'off') {
       // Off means off: no suggestion left on screen, no level still sent.
       // A level already set through /effort stays; it is the session's own.
       await update($, suggestion, () => null)
       await update($, applied, () => null)
     }
 
-    return { text: `Effort suggester is ${next ? 'on' : 'off'}.` }
+    const said = {
+      on: 'on.',
+      save: 'on, to save only: it suggests lower levels, never higher.',
+      off: 'off.',
+    }
+
+    return { text: `Effort suggester is ${said[next]}` }
+  })
+
+  on('command.run', { command: 'effort-stats' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+
+    if (arg === 'reset') {
+      await $.store.delete('log')
+
+      return { text: 'Effort stats cleared.' }
+    }
+    if (arg !== '') return { text: 'Usage: /effort-stats [reset]' }
+
+    return { text: report(parseLog(await $.store.get('log'))) }
   })
 }

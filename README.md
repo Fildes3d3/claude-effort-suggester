@@ -1,7 +1,8 @@
 # effort-suggester
 
 A Claude Code mod that suggests an effort level (low / medium / high / max)
-for each prompt you submit, with one click to apply it.
+while you type a prompt, applies it in one click, and logs what each level
+costs you in tokens.
 
 ## Install
 
@@ -26,17 +27,63 @@ then Add plugin.
 Needs a Claude Code build with mods (hooks modules); built and tested on
 2.1.325.
 
+To update an installed copy to the newest version, from a shell, then
+restart Claude Code:
+
+```bash
+claude plugin marketplace update claude-effort-suggester
+```
+
+```bash
+claude plugin update effort-suggester@claude-effort-suggester
+```
+
 ## What it does
 
-- On submit, a rule-based classifier scores the prompt (no model call).
-- If the suggestion differs from the effort the turn is running at, a row
-  appears in the band above the prompt:
-  `Suggested effort high: refactor + stack trace (now medium) [Use high] [Dismiss]`
-- If it matches, nothing is shown.
-- `Use <level>` applies it. Nothing changes without that click.
-- `/effort-check <prompt>` scores a prompt without sending it, and offers
-  the same `Use <level>` button.
-- `/effort-suggest on | off` turns the mod on or off (kept across sessions).
+- While you type, a rule-based classifier scores the draft (no model call,
+  no tokens spent).
+- If its level differs from the effort the session is running at, a row
+  appears above the prompt, before you send:
+  `Suggested effort low: what is + short prompt (now high) [Use low] [Dismiss]`
+- `Use <level>` applies it. Clicked before sending, the whole turn runs at
+  that level. Nothing changes without that click.
+- If the level already matches, nothing is shown.
+- Every finished turn is logged with the level it was suggested, the level
+  it ran at and its output tokens, so you can see what the levels cost you.
+
+## Commands
+
+| Command | What |
+| --- | --- |
+| `/effort-check <prompt>` | Scores a prompt without sending it, with the signals behind the score. |
+| `/effort-suggest on` | Suggests in both directions (the default). |
+| `/effort-suggest save` | Only ever suggests a lower level: the mode for cutting token use. |
+| `/effort-suggest off` | Suggests nothing and logs nothing. No argument flips on and off. |
+| `/effort-stats` | What your turns cost at each level, and what running above the suggestion cost. |
+| `/effort-stats reset` | Clears the log. |
+
+The mode and the log are kept across sessions.
+
+## Does it save tokens?
+
+Only your own numbers can say. `/effort-stats` prints them. An example, with
+made-up figures:
+
+```
+Effort stats: 42 turns, 310,400 output tokens
+Used the suggested level: 30 · above it: 9 · below it: 3
+
+Average output tokens per turn, by what the prompt scored (turns):
+Scored low: 640 at low (11) · 2,150 at medium (6)
+Scored medium: 4,900 at medium (14) · 9,300 at high (3)
+Scored high: 5,200 at medium (3) · 14,800 at high (5)
+
+9 turns run above their suggestion cost about 21,000 output tokens more than your average at the suggested level.
+```
+
+Read a line across: the same kind of prompt at different levels. The last
+line compares the turns you ran above their suggestion with your own average
+at the suggested level, once there are three such turns to average.
 
 ## Files
 
@@ -44,8 +91,9 @@ Needs a Claude Code build with mods (hooks modules); built and tested on
 | --- | --- |
 | `hooks/config.ts` | Every weight, threshold and keyword. Edit this to tune. |
 | `hooks/classify.ts` | The classifier, a pure function. |
-| `hooks/register.tsx` | The hooks: submit, the band, apply, the commands. |
-| `hooks/*.test.ts(x)` | Tests: 20 sample prompts, plus the band, apply, undo and the toggle. |
+| `hooks/stats.ts` | The usage log and the `/effort-stats` report, pure functions. |
+| `hooks/register.tsx` | The hooks: typing, submit, the band, apply, the log, the commands. |
+| `hooks/*.test.ts(x)` | Tests for all of the above. |
 | `types/index.d.ts` | The mod's state contract. |
 
 ## Check and test
@@ -79,8 +127,20 @@ claude --plugin-dir /path/to/effort-suggester
   until you send your next message, and `/effort-check` and `(now …)`
   report the level of the last request until then.
 - `/effort` set this way lasts for the session, as when typed.
-- The suggestion arrives as the turn starts, so a click applies from the
-  next model request on, not to the request already in flight.
+- The log counts output tokens (thinking and answer) of main-loop turns.
+  Subagent turns and interrupted turns are left out, and input tokens are
+  not counted. It holds the newest 500 turns.
+- The estimate compares turns of different prompts, so it is a rough guide,
+  not a controlled measurement.
+- The classifier reads wording, not difficulty: a hard problem phrased
+  plainly scores medium.
+- A click while a turn is running applies from the next model request on,
+  not to the request already in flight. Click before sending to cover the
+  whole turn.
+
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## Licence
 

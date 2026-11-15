@@ -4,9 +4,9 @@
 // maps to a level through `thresholds` (the lowest score for each level;
 // anything under `medium` is low).
 //
-// Keywords match whole words or phrases, case-insensitive, with an optional
-// -s / -ed / -ing ending ("refactor" matches "refactoring"). Each group
-// counts at most `cap` distinct hits.
+// Keywords match whole words or phrases, case-insensitive, with their common
+// endings: "refactor" also matches refactoring, "debug" debugging, "migrate"
+// migrated and migrating. Each group counts at most `cap` distinct hits.
 
 export const CONFIG = {
   base: 2,

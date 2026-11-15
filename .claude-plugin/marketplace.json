@@ -1,5 +1,6 @@
 {
   "name": "claude-effort-suggester",
+  "description": "effort-suggester, a Claude Code mod that suggests an effort level for each prompt.",
   "owner": {
     "name": "fildes"
   },

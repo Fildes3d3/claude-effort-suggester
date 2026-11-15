@@ -4,13 +4,15 @@
 import type { Level } from '../types'
 import { CONFIG, type Config } from './config'
 
+export type Signal = { label: string; score: number }
+
 export type Result = {
   level: Level
   score: number
   /** e.g. "high: refactor + stack trace" */
   reason: string
   /** Every signal that fired, strongest first. */
-  signals: { label: string; score: number }[]
+  signals: Signal[]
 }
 
 const STACK_TRACE = [
@@ -26,8 +28,30 @@ const FILE =
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
-const matcher = (word: string) =>
-  new RegExp(`(?<![\\w-])${escape(word)}(?:s|ed|ing)?(?![\\w-])`, 'i')
+/**
+ * The word and its common endings: "plan" also reads plans, planned and
+ * planning; "migrate" also migrates, migrated and migrating.
+ */
+const forms = (word: string) => {
+  const last = word.at(-1) ?? ''
+
+  return last === 'e'
+    ? `${escape(word.slice(0, -1))}(?:e|es|ed|ing)`
+    : `${escape(word)}(?:${escape(last)}?(?:ed|ing)|s|es)?`
+}
+
+// Built once per word: the classifier runs on every keystroke.
+const matchers = new Map<string, RegExp>()
+
+const matcher = (word: string) => {
+  const known = matchers.get(word)
+  if (known) return known
+
+  const made = new RegExp(`(?<![\\w-])${forms(word)}(?![\\w-])`, 'i')
+  matchers.set(word, made)
+
+  return made
+}
 
 /** The words of `group` found in `text`, at most `cap` of them. */
 const hits = (text: string, group: { words: string[]; cap: number }) =>
@@ -38,7 +62,8 @@ const countAsks = (text: string, joiners: string[]) => {
   const items = (text.match(/^\s*(?:[-*•]|\d+[.)])\s+\S/gm) ?? []).length
   const joined = joiners.filter(word => matcher(word).test(text)).length
 
-  return Math.max(1, questions + items + joined)
+  // A joiner adds an ask to the one it follows: "do A and also B" is two.
+  return Math.max(1, questions + items) + joined
 }
 
 const levelOf = (score: number, thresholds: Config['thresholds']): Level => {
@@ -50,7 +75,7 @@ const levelOf = (score: number, thresholds: Config['thresholds']): Level => {
 }
 
 export const classify = (prompt: string, config: Config = CONFIG): Result => {
-  const signals: Result['signals'] = []
+  const signals: Signal[] = []
   const add = (label: string, score: number) => {
     if (score !== 0) signals.push({ label, score })
   }
